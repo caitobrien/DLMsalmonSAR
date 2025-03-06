@@ -1,0 +1,325 @@
+---
+title: "Troubleshoot_convergence"
+output: html_document
+date: "2025-02-28"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(MARSS)
+
+load(here("shinyapp/data/sar_raw_data.rda"))
+```
+
+Are you are having trouble getting the model to converge, then start by
+addressing the following:
+
+```{r }
+data_train<-sar_dart %>% 
+  filter(between(year, 2002,2021))
+```
+
+1)  Are you trying to fit a bad model, e.g., fitting a non-stationary
+    model to stationary data or fitting a model that specifies
+    independence of errors or states to data that clearly violate that
+    assumption or fitting a model that implies a particular stationary
+    distribution to data that strongly violate that?
+    -   Data do appear mostly stationary for DART
+
+```{r}
+ggplot(sar_raw_data %>% filter(index == "CUI") %>% drop_na(), aes(x = year, y = logit.s, color = sar.method)) +
+  geom_line() +
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "All available data")
+
+#lm
+ggplot(sar_raw_data %>% filter(index == "CUI", 
+                               ifelse(sar.method == "DART", between(year, 2002,2021),TRUE)
+                               ) %>% drop_na(), 
+       aes(x = year, y = logit.s, color = sar.method, fill = sar.method))+
+  geom_line() +
+  geom_point()+
+  geom_smooth(method = "lm", se = TRUE) +
+    labs(title = "DART: 2002:2021")
+#loess smoothing
+ggplot(sar_raw_data %>% filter(index == "CUI", 
+                               ifelse(sar.method == "DART", between(year, 2002,2021),TRUE)
+                               ) %>% drop_na(), 
+       aes(x = year, y = logit.s, color = sar.method, fill = sar.method))+
+  geom_line() +
+  geom_point()+
+  geom_smooth(method = "loess", se = TRUE, span = .95) +
+    labs(title = "DART: 2002:2021")
+
+```
+
+
+
+2)  Do you have confoundedparameters, e.g., two parameters that have the
+    same effect (e.g., effectively two intercepts)?,
+3)  Are you trying to fit a model to 1 data point somewhere, e.g., in a
+    big multivariate dataset with lots of missing values?
+    - no
+4)  How many parameters are you trying to estimate per data point?
+5)  Check your residuals (look at the QQplots in plot(fit)) for
+    normality.
+    
+6)  Did you do any data transformations that would cause one of the
+    variances to go to zero? Replacing 0s with a constant will do that.
+    Try replacing them with NAs (missing). Do you have long strings of
+    constant numbers in your data? Binned data often look like that, and
+    that will drive Q to 0.
+
+-------
+```{r}
+control_list<-list(maxit = 1000, allow.degen = FALSE)
+```
+
+
+# DART
+- only data from 2002-2021
+- does not include a covariate
+- Next step, try pulling in SAR by 1) transport and 2) different reaches
+```{r}
+sar_dart<- sar_raw_data %>%
+  filter(
+    between(year,2002,2021),
+    index == "CUI",
+    sar.method == "DART"
+  ) 
+
+
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+m <- 1   
+B <- diag(m)                       
+U <- matrix(0, nrow = m, ncol = 1)  
+Q <- "diagonal and unequal"         
+A <- matrix(0)               
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, A = A, R = R)
+
+fit1 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+plot(fit1, silent = TRUE, plot.type = c("fitted.ytT", "xtT"))
+
+```
+
+# Scheuerell and Williams (2005)
+
+## CUI
+- data years: 1964 - 2005
+- Q matrix diagonal and unequal
+```{r }
+sar_sw_cui<- sar_raw_data %>%
+  filter(
+    index == "CUI",
+    sar.method == "Scheuerell and Williams (2005)"
+  ) %>% 
+  drop_na()
+
+
+years <- sar_sw_cui$year
+TT <- length(years)
+dat <- matrix(sar_sw_cui$logit.s, nrow = 1)
+index <- sar_sw_cui$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1)
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "diagonal and unequal"
+A <- matrix(0)
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit2 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+plot(fit2, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+```
+
+## CUTI
+- data years: 1988 - 2005
+- Q matrix unconstrained
+```{r }
+sar_sw_cuti<- sar_raw_data %>%
+  filter(
+    index == "CUTI",
+    sar.method == "Scheuerell and Williams (2005)"
+  ) %>% 
+  drop_na()
+
+
+years <- sar_sw_cuti$year
+TT <- length(years)
+dat <- matrix(sar_sw_cuti$logit.s, nrow = 1)
+index <- sar_sw_cuti$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z     
+Q <- "unconstrained"
+A <- matrix(0)
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit3 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list, control = control_list)
+autoplot(fit3, silent = TRUE)
+autoplot(fit3, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
+
+MARSSparamCIs(fit3)
+
+#attempted to run without z-score for CUTI, did converge quicker (145 iterations) and some difference in R and Q output but model lower AIC and log-likelihood for z-scored covariate. 
+```
+
+
+
+# CJS
+- next steps:
+  1) rerun with updated CJS data (confirm or check with MC that this is all data not limited by length data)
+  2) Include transport and/or temperature as covariate.
+  3) rerun to calculate SAR for different reaches: BON-BOA, TWX-BOA, and LGR-LGA
+
+## CUI
+```{r}
+sar_cjs<- sar_raw_data %>%
+  filter(index == "CUI",sar.method == "CJS") %>%
+  drop_na()
+
+years <- sar_cjs$year
+TT <- length(years)
+dat <- matrix(sar_cjs$logit.s, nrow = 1)
+index <- sar_cjs$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "diagonal and unequal"#"unconstrained"
+A <- matrix(0)
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit4 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+autoplot(fit4, silent = TRUE)
+autoplot(fit4, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
+
+MARSSparamCIs(fit4)
+
+```
+
+## CUTI
+- Q matrix unconstrained
+```{r}
+sar_cjs<- sar_raw_data %>%
+  filter(index == "CUTI",sar.method == "CJS") %>%
+  drop_na()
+
+years <- sar_cjs$year
+TT <- length(years)
+dat <- matrix(sar_cjs$logit.s, nrow = 1)
+index <- sar_cjs$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z      
+Q <- "unconstrained"
+A <- matrix(0)
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit5 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+autoplot(fit5, silent = TRUE)
+autoplot(fit5, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
+
+MARSSparamCIs(fit5)
+
+```
+
+## NCBI
+- Q matrix unconstrained
+- model process and observation error is explained a bit more with running ncbi as reported values without z-score
+```{r}
+sar_cjs<- sar_raw_data %>%
+  filter(index == "NCBI",sar.method == "CJS") %>%
+  drop_na()
+
+years <- sar_cjs$year
+TT <- length(years)
+dat <- matrix(sar_cjs$logit.s, nrow = 1)
+index <- sar_cjs$value
+# index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1) #run as reported
+m<-2  
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index     
+Q <- "unconstrained"
+A <- matrix(0)
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit6 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+autoplot(fit6, silent = TRUE)
+autoplot(fit6, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
+
+MARSSparamCIs(fit6)
+
+```
+
+## ICPB
+- does not run with unconstrained Q
+- does not converge if using z-scored value or unstandardized. Seems to be on a logit-scale
+```{r}
+sar_cjs<- sar_raw_data %>%
+  filter(index == "ICPB",sar.method == "CJS") %>%
+  drop_na()
+
+years <- sar_cjs$year
+TT <- length(years)
+dat <- matrix(sar_cjs$logit.s, nrow = 1)
+index <- sar_cjs$value
+# index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index    
+Q <- "unconstrained"
+A <- matrix(0)
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit7 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+autoplot(fit7, silent = TRUE)
+autoplot(fit7, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
+
+MARSSparamCIs(fit6)
+
+```
+
