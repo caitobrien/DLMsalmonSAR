@@ -77,41 +77,438 @@ ggplot(sar_raw_data %>% filter(index == "CUI",
 
 -------
 ```{r}
-control_list<-list(maxit = 1000, allow.degen = FALSE)
+control_list<-list(maxit = 1000, allow.degen = FALSE, control = list(conv.test.slope.tol = 0.1)) 
+
+#use to test convergence  at lower slope abstol
+```
+
+```{r CUI}
+library(rerddap) 
+
+### ERDAPP, NOAA upwelling indice CUI
+# Set the URL of the ERDDAP server
+url <- "https://upwell.pfeg.noaa.gov/erddap/"
+
+# Get information about the erdCUTI dataset
+info <- info(datasetid = "erdUI45mo", url = url)
+info # copy max range value from metadata
+
+# Download the dataset
+dat <- griddap(info,
+               time = c("1964-01-01T00:00:00Z", "2025-01-15T00:00:00Z"), #currently pulling all data to date (adjust as needed)
+               latitude = c(45,45)
+)
+
+# format time and lat/long
+df_cui_raw<-dat$data %>% 
+  mutate(time.day = lubridate::ymd_hms(time),
+         year = year(time.day),
+         month = month(time.day),
+         day = day(time.day), 
+         adjlong = longitude-360) #set to -180 to 180
+
+## only include april CUI from ERDAPP data (for now)
+df_cui<-df_cui_raw %>% 
+  filter(month == 4) %>% 
+  select(year, upwelling_index) %>% 
+    rename("value" = upwelling_index)  %>%
+  mutate(index = "CUI")
 ```
 
 
-# DART
-- only data from 2002-2021
-- does not include a covariate
-- Next step, try pulling in SAR by 1) transport and 2) different reaches
+```{r CUTI}
+
+# Get information about the erdCUTI dataset
+info <- info(datasetid = "erdCUTImonthly", url = url)
+info #copy max time range from metadata
+
+# Download the dataset
+dat <- griddap(info,
+               time = c("1988-01-15T00:00:00Z", "2025-02-15T00:00:00Z"), #currently pulling all data to date
+               latitude = c(45,45)
+)
+
+
+df_cuti<-dat$data %>% 
+  mutate(time.day = lubridate::ymd_hms(time),
+         year = year(time.day),
+         month = month(time.day),
+         day = day(time.day)) %>% 
+  filter(month == 4) %>% 
+  select(year, CUTI)  %>% 
+  rename(value = "CUTI") %>% 
+  mutate(index = "CUTI")
+```
+```{r NCBI}
+library(readxl) #
+#Northern copepod biomass data
+#NCBI<-read_csv(here("data-raw", "northern_copepod_biomass_newportOR.csv")) 
+
+url<-"https://www.fisheries.noaa.gov/s3/2023-10/TempOxyNoSo-10232023.xlsx"
+
+# Download the file to a temporary location
+temp_file <- tempfile(fileext = ".xlsx")
+download.file(url, temp_file, mode = "wb")
+
+ncbi_raw<-read_excel(temp_file)
+
+
+# Currently set to only pull April data but NOAA stoplight chart returns value for May - September. Future Research direction is attempting various month iterations.
+df_ncbi<-ncbi_raw %>% 
+  filter(Month == 4) %>% #select only april for now-- update with more research
+  group_by(Year) %>% 
+  summarise(value = mean(NORTHERN)) %>% 
+  select("year" = Year, value) %>% 
+  mutate(index = "NCBI")
+```
+
+```{r load_ICPB_data}
+#Northern copepod biomass data (in-house)
+# df_ICPB<-read_csv(here("data-raw", "IndexOfCoastalPreyBiomass.csv")) 
+ 
+#to pull directly from stoplight table 
+library(data.table)
+year <- 2024 #update most recent year
+url <- paste0("https://www.fisheries.noaa.gov/s3/2024-12/stoplight-raw-data-",year,".csv")
+raw_data<-fread(url, header = TRUE, check.names = FALSE)
+
+df_icpb<-raw_data %>% 
+  mutate(across(-1, as.numeric)) %>%
+  pivot_longer(-1, names_to = "year", values_to = "value") %>% 
+  filter(`Ecosystem Indicators` == "Nearshore Ichthyoplankton\nLog(mg C 1,000 m-3; Jan-Mar)") %>% 
+  select(year, value) %>% 
+  mutate(index = "ICPB") %>% 
+  mutate(year = as.integer(year))
+
+range(df_icpb$value)
+```
+
+# DART 2000 -2022
+### BON - BOA
 ```{r}
-sar_dart<- sar_raw_data %>%
-  filter(
-    between(year,2002,2021),
-    index == "CUI",
-    sar.method == "DART"
-  ) 
+bon_dart<-read.csv(here("data/dart_BON_BOA_sar.csv")) %>% 
+  drop_na(meanSAR) %>% 
+  mutate(logit.s = qlogis(meanSAR/100)) %>% 
+  select(year, logit.s) %>% 
+  mutate(year = as.numeric(year))
 
+bon_dart<-bon_dart %>% 
+  left_join(df_cui, by = "year") %>% 
+  mutate(sar.method = "DART")
 
+sar_dart<- bon_dart %>% 
+  left_join(df_cuti, by = "year")
+
+```
+
+#### no covariate
+```{r}
+
+{
 years <- sar_dart$year
 TT <- length(years)
 dat <- matrix(sar_dart$logit.s, nrow = 1)
 m <- 1   
-B <- diag(m)                       
-U <- matrix(0, nrow = m, ncol = 1)  
-Q <- "diagonal and unequal"         
+B <-  matrix("m", nrow = m, ncol = 1)                      
+U <- matrix("u", nrow = m, ncol = 1)  
+Q <- "equalvarcov" #doesn't really apply to 1 state variable         
 A <- matrix(0)               
-R <- matrix("r")
-
+R <- matrix(.05)
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
 
-fit1 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
-
-plot(fit1, silent = TRUE, plot.type = c("fitted.ytT", "xtT"))
-
+autoplot(fit, silent = TRUE)
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
 ```
+#### CUI
+Attempt with set R to 0.05, Q to "unconstrained", U to be estimated and B estimated but equal
+```{r}
+{
+years <- bon_dart$year
+TT <- length(years)
+dat <- matrix(bon_dart$logit.s, nrow = 1)
+index <- bon_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-  diag(m) #diagonal and unequal" #diag(m) #"identity" #"unconstrained"
+U <-  matrix("u", nrow = m, ncol = 1) #"zero" #changing to  -1 to 1  works with varyin deg changes. higher(+ or -) values improves R.r and less in Q but estimate is worse.
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.05)
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit6 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+autoplot(fit6, silent = TRUE) # plot with all data (past and future observations) included in estimate
+autoplot(fit6, silent = TRUE, plot.type = "fitted.ytt1")# plot with only past observations included in the estimate (one-step ahead)
+# fitted.ytt1 is more realisitic of what real forecast would be-- but the extra tight CI in ytT likely means that the model is relying heavily on future observations and that the model  likely needs to be tweaked to better estimate B, U, Z, Q and R
+MARSSparamCIs(fit6)
+```
+
+#### CUTI
+```{r}
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+index <- sar_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m) #"identity" #"unconstrained" "diagonal and unequal" #
+U <-  matrix(0, nrow = m, ncol = 1) #"zero" 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.05)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit6)
+```
+#### NCBI
+```{r}
+sar_dart<-sar_raw_data %>% 
+  filter(index == "NCBI", sar.method == "DART") %>% 
+  select(year, value, index) %>% 
+  right_join(select(bon_dart, year, logit.s), by = "year")
+
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+index <- sar_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m) #"identity" #"unconstrained" "diagonal and unequal" #
+U <-  matrix(0, nrow = m, ncol = 1) #"zero" 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.1)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+#### ICPB
+```{r}
+sar_dart<-sar_raw_data %>% 
+  filter(index == "ICPB", sar.method == "DART") %>% 
+  select(year, value, index) %>% 
+  right_join(select(bon_dart, year, logit.s), by = "year")
+
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+index <- sar_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-"diagonal and unequal" # diag(m) #"identity" #"unconstrained" 
+U <-  matrix("u", nrow = m, ncol = 1) #"zero" 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.05)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+
+
+### LGR - LGA
+
+#### no covariate
+```{r}
+sar_dart<- sar_raw_data %>%
+  filter(
+    index == "CUI",
+    sar.method == "DART"
+  ) 
+
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+m <- 1   
+B <-  matrix("m", nrow = m, ncol = 1)                      
+U <- matrix("u", nrow = m, ncol = 1)  
+Q <- "equalvarcov" #doesn't really apply to 1 state variable         
+A <- matrix(0)               
+R <- matrix(.05)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+autoplot(fit, silent = TRUE)
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+```
+
+
+#### CUI
+
+```{r}
+sar_dart<- sar_raw_data %>%
+  filter(
+    # between(year,2002,2021),
+    index == "CUI",
+    sar.method == "DART"
+  ) %>% 
+  drop_na
+
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+index <- sar_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-  "diagonal and unequal" #diag(m) #"identity" #"unconstrained"
+U <-  matrix(0, nrow = m, ncol = 1) #"zero" #changing to  -1 to 1  works with varyin deg changes. higher(+ or -) values improves R.r and less in Q but estimate is worse.
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.05)
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit6 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+DARTautoplot(fit6, silent = TRUE) # plot with all data (past and future observations) included in estimate
+autoplot(fit6, silent = TRUE, plot.type = "fitted.ytt1")# plot with only past observations included in the estimate (one-step ahead)
+# fitted.ytt1 is more realisitic of what real forecast would be-- but the extra tight CI in ytT likely means that the model is relying heavily on future observations and that the model  likely needs to be tweaked to better estimate B, U, Z, Q and R
+MARSSparamCIs(fit6)
+```
+
+#### CUTI
+```{r}
+sar_dart<- sar_raw_data %>%
+  filter(
+    # between(year,2002,2021),
+    index == "CUTI",
+    sar.method == "DART"
+  ) %>% 
+  drop_na
+
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+index <- sar_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-  diag(m) #"identity" #"unconstrained"
+U <-  matrix(0, nrow = m, ncol = 1) #"zero" 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.05)
+
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+autoplot(fit, silent = TRUE)
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+#### NCBI
+```{r}
+sar_dart<- sar_raw_data %>%
+  filter(
+    # between(year,2002,2021),
+    index == "NCBI",
+    sar.method == "DART"
+  ) %>% 
+  drop_na
+
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+index <- sar_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-  diag(m) #"identity" #"unconstrained"
+U <-  matrix(0, nrow = m, ncol = 1) #"zero" 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <-  "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.1)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+
+autoplot(fit, silent = TRUE)
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+#### ICPB
+```{r}
+sar_dart<- sar_raw_data %>%
+  filter(
+    # between(year,2002,2021),
+    index == "ICPB",
+    sar.method == "DART"
+  ) %>% 
+  drop_na
+
+{
+years <- sar_dart$year
+TT <- length(years)
+dat <- matrix(sar_dart$logit.s, nrow = 1)
+index <- sar_dart$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- "diagonal and unequal" #diag(m) #"identity" #"unconstrained"
+U <-  matrix("u", nrow = m, ncol = 1) #"zero" 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <-  "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.05)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list) #control = list(conv.test.slope.tol = 0.1) checked
+}
+
+autoplot(fit, silent = TRUE)
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+
+
 
 # Scheuerell and Williams (2005)
 
@@ -126,7 +523,7 @@ sar_sw_cui<- sar_raw_data %>%
   ) %>% 
   drop_na()
 
-
+{
 years <- sar_sw_cui$year
 TT <- length(years)
 dat <- matrix(sar_sw_cui$logit.s, nrow = 1)
@@ -141,10 +538,10 @@ Z[1,2,] <- index_z
 Q <- "diagonal and unequal"
 A <- matrix(0)
 R <- matrix("r")
-
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
 fit2 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
 plot(fit2, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
 ```
 
@@ -159,27 +556,27 @@ sar_sw_cuti<- sar_raw_data %>%
   ) %>% 
   drop_na()
 
-
+{
 years <- sar_sw_cuti$year
 TT <- length(years)
 dat <- matrix(sar_sw_cuti$logit.s, nrow = 1)
 index <- sar_sw_cuti$value
 index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
 m<-2  
-B <- diag(m)
-U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+B <- "diagonal and unequal"
+U <- matrix("u", nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
 Z <- array(NA, c(1, m, TT))  
 Z[1,1,] <- rep(1, TT)       
 Z[1,2,] <- index_z     
 Q <- "unconstrained"
 A <- matrix(0)
-R <- matrix("r")
-
+R <- matrix(.05)
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
 fit3 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list, control = control_list)
+}
 autoplot(fit3, silent = TRUE)
-autoplot(fit3, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
+diagautoplot(fit3, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
 
 MARSSparamCIs(fit3)
 
@@ -187,139 +584,394 @@ MARSSparamCIs(fit3)
 ```
 
 
-
 # CJS
 - next steps:
   1) rerun with updated CJS data (confirm or check with MC that this is all data not limited by length data)
   2) Include transport and/or temperature as covariate.
   3) rerun to calculate SAR for different reaches: BON-BOA, TWX-BOA, and LGR-LGA
-
-## CUI
+  
 ```{r}
-sar_cjs<- sar_raw_data %>%
-  filter(index == "CUI",sar.method == "CJS") %>%
-  drop_na()
+bon_sar_raw<-read.csv(here("data/bon.boa.surv.yr.1994.2021_250309.csv"))
+bon_sar_raw<-bon_sar_raw[-1]
+lgr_sar_raw<-read.csv(here("data/lgr.lga.surv.yr.1994.2021_250309.csv"))
+lgr_sar_raw<-lgr_sar_raw[-1]
 
-years <- sar_cjs$year
+
+bon_sar<-bon_sar_raw %>% 
+  left_join(df_cui, by = "year") %>% 
+  mutate(sar.method = "CJS",
+         logit.s = qlogis(BON_BOA_SAR)) %>% 
+  select(-BON_BOA_SAR)
+
+
+lgr_sar<-lgr_sar_raw %>% 
+  left_join(df_cui, by = "year") %>% 
+  mutate(sar.method = "CJS",
+         logit.s = qlogis(LGR_LGA_SAR)) %>% 
+  select(-LGR_LGA_SAR)
+
+
+plotly::ggplotly(
+  ggplot() +
+geom_line(data = bon_sar, aes(x = year, y= plogis(logit.s)), color = "red") +
+  geom_line(data = lgr_sar, aes(x = year, y= plogis(logit.s)), color = "green") +
+geom_line(data = sar_raw_data %>% filter(index == "CUI", sar.method == "CJS"), aes(x = year, y = plogis(logit.s))) 
+)
+
+ggplot(bon_sar, aes(x = year, y = value))+
+  geom_line()
+```
+
+
+```{r shifting mean}
+library(ggplot2)
+library(dplyr)
+
+##CUI
+# Assuming bon_sar has columns 'year' and 'value'
+# Calculate the means for 5-year and 10-year intervals
+bon_sar_avg <- bon_sar %>%
+  mutate(interval_5yr = (year - min(year)) %/% 5,
+         interval_10yr = (year - min(year)) %/% 10)
+
+mean_5yr <- bon_sar_avg %>%
+  group_by(interval_5yr) %>%
+  summarize(mean_value_5yr = mean(value),
+            start_year_5yr = min(year),
+            end_year_5yr = max(year))
+
+mean_10yr <- bon_sar_avg %>%
+  group_by(interval_10yr) %>%
+  summarize(mean_value_10yr = mean(value),
+            start_year_10yr = min(year),
+            end_year_10yr = max(year))
+
+# Plot the data with horizontal line segments for each mean
+ggplot(bon_sar_avg, aes(x = year, y = value)) +
+  geom_line() +
+  geom_segment(data = mean_5yr, aes(x = start_year_5yr, xend = end_year_5yr, y = mean_value_5yr, yend = mean_value_5yr), color = "blue", linetype = "dashed") +
+  geom_segment(data = mean_10yr, aes(x = start_year_10yr, xend = end_year_10yr, y = mean_value_10yr, yend = mean_value_10yr), color = "red", linetype = "dotted") +
+  labs(title = "Shifting Mean Across Years _CUI",
+       subtitle = "Blue dashed lines: 5-year mean, Red dotted lines: 10-year mean",
+       x = "Year",
+       y = "Value")
+
+## survival rate
+mean_5yr <- bon_sar_avg %>%
+  group_by(interval_5yr) %>%
+  summarize(mean_value_5yr = mean(logit.s),
+            start_year_5yr = min(year),
+            end_year_5yr = max(year))
+
+mean_10yr <- bon_sar_avg %>%
+  group_by(interval_10yr) %>%
+  summarize(mean_value_10yr = mean(logit.s),
+            start_year_10yr = min(year),
+            end_year_10yr = max(year))
+
+# Plot the data with horizontal line segments for each mean
+ggplot(bon_sar_avg, aes(x = year, y = logit.s)) +
+  geom_line() +
+  geom_segment(data = mean_5yr, aes(x = start_year_5yr, xend = end_year_5yr, y = mean_value_5yr, yend = mean_value_5yr), color = "blue", linetype = "dashed") +
+  geom_segment(data = mean_10yr, aes(x = start_year_10yr, xend = end_year_10yr, y = mean_value_10yr, yend = mean_value_10yr), color = "red", linetype = "dotted") +
+  labs(title = "Shifting Mean Across Years _ SAR",
+       subtitle = "Blue dashed lines: 5-year mean, Red dotted lines: 10-year mean",
+       x = "Year",
+       y = "SAR (logit)")
+
+
+
+```
+
+
+## BON - BOA
+### no covariate
+```{r}
+sar<-bon_sar
+{
+years <- sar$year
 TT <- length(years)
-dat <- matrix(sar_cjs$logit.s, nrow = 1)
-index <- sar_cjs$value
+dat <- matrix(sar$logit.s, nrow = 1)
+m <- 1   
+B <-  matrix("m", nrow = m, ncol = 1)                      
+U <- matrix("u", nrow = m, ncol = 1)  
+Q <- "equalvarcov" #doesn't really apply to 1 state variable         
+A <- matrix(0)               
+R <- matrix("r")
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+autoplot(fit, silent = TRUE)
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+```
+### CUI
+```{r}
+{
+years <- sar$year
+TT <- length(years)
+dat <- matrix(sar$logit.s, nrow = 1)
+index <- sar$value
 index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
 m<-2  
-B <- diag(m)
-U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+B <-  "diagonal and unequal" #diag(m) #"identity" #"unconstrained"
+U <-  matrix(0, nrow = m, ncol = 1) 
 Z <- array(NA, c(1, m, TT))  
 Z[1,1,] <- rep(1, TT)       
 Z[1,2,] <- index_z       
-Q <- "diagonal and unequal"#"unconstrained"
+Q <- "unconstrained" #"diagonal and unequal"
 A <- matrix(0)
-R <- matrix("r")
-
+R <- matrix(.05)
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
-fit4 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
-autoplot(fit4, silent = TRUE)
-autoplot(fit4, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
-
-MARSSparamCIs(fit4)
-
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
 ```
 
-## CUTI
-- Q matrix unconstrained
-```{r}
-sar_cjs<- sar_raw_data %>%
-  filter(index == "CUTI",sar.method == "CJS") %>%
-  drop_na()
+### CUTI
 
-years <- sar_cjs$year
+```{r}
+sar<-sar %>% 
+  select(year, logit.s) %>% 
+  left_join(df_cuti, by = "year") 
+{
+years <- sar$year
 TT <- length(years)
-dat <- matrix(sar_cjs$logit.s, nrow = 1)
-index <- sar_cjs$value
+dat <- matrix(sar$logit.s, nrow = 1)
+index <- sar$value
 index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
 m<-2  
-B <- diag(m)
-U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+B <-  "diagonal and equal" #diag(m) 
+U <-  matrix(0, nrow = m, ncol = 1) 
 Z <- array(NA, c(1, m, TT))  
 Z[1,1,] <- rep(1, TT)       
-Z[1,2,] <- index_z      
-Q <- "unconstrained"
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
 A <- matrix(0)
-R <- matrix("r")
-
+R <- matrix(.1)
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
-fit5 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
-autoplot(fit5, silent = TRUE)
-autoplot(fit5, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
-
-MARSSparamCIs(fit5)
-
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
 ```
 
-## NCBI
-- Q matrix unconstrained
-- model process and observation error is explained a bit more with running ncbi as reported values without z-score
+### NCBI
+
 ```{r}
-sar_cjs<- sar_raw_data %>%
-  filter(index == "NCBI",sar.method == "CJS") %>%
+#started in 1997
+sar<-sar %>% 
+  select(year, logit.s) %>% 
+  left_join(df_ncbi, by = "year") %>% 
   drop_na()
 
-years <- sar_cjs$year
+{
+years <- sar$year
 TT <- length(years)
-dat <- matrix(sar_cjs$logit.s, nrow = 1)
-index <- sar_cjs$value
-# index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1) #run as reported
+dat <- matrix(sar$logit.s, nrow = 1)
+index <- sar$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
 m<-2  
-B <- diag(m)
-U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+B <-  diag(m) #"diagonal and equal" #
+U <-  matrix(0, nrow = m, ncol = 1) 
 Z <- array(NA, c(1, m, TT))  
 Z[1,1,] <- rep(1, TT)       
-Z[1,2,] <- index     
-Q <- "unconstrained"
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
 A <- matrix(0)
-R <- matrix("r")
-
+R <- matrix(.1)
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
-fit6 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
-autoplot(fit6, silent = TRUE)
-autoplot(fit6, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
-
-MARSSparamCIs(fit6)
-
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
 ```
+### ICPB
 
-## ICPB
-- does not run with unconstrained Q
-- does not converge if using z-scored value or unstandardized. Seems to be on a logit-scale
 ```{r}
-sar_cjs<- sar_raw_data %>%
-  filter(index == "ICPB",sar.method == "CJS") %>%
+#started in 1997
+sar<-sar %>% 
+  select(year, logit.s) %>% 
+  left_join(df_icpb, by = "year") %>% 
   drop_na()
 
-years <- sar_cjs$year
+{
+years <- sar$year
 TT <- length(years)
-dat <- matrix(sar_cjs$logit.s, nrow = 1)
-index <- sar_cjs$value
-# index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+dat <- matrix(sar$logit.s, nrow = 1)
+index <- sar$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
 m<-2  
-B <- diag(m)
-U <- matrix(0, nrow = m, ncol = 1) #changing to estimate "u" changes X2 to negative linear line
+B <-  diag(m) #"diagonal and unequal" #
+U <-  matrix(0, nrow = m, ncol = 1) 
 Z <- array(NA, c(1, m, TT))  
 Z[1,1,] <- rep(1, TT)       
-Z[1,2,] <- index    
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.1)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+## LGR - LGA
+### no covariate
+```{r}
+sar<-lgr_sar
+{
+years <- sar$year
+TT <- length(years)
+dat <- matrix(sar$logit.s, nrow = 1)
+m <- 1   
+B <-  matrix("m", nrow = m, ncol = 1)                      
+U <- matrix(0, nrow = m, ncol = 1)  
+Q <- "equalvarcov" #doesn't really apply to 1 state variable         
+A <- matrix(0)               
+R <- matrix("r")
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+autoplot(fit, silent = TRUE)
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+```
+### CUI
+```{r}
+# model converges with CUI (+ adjustments)
+# Estimation converged in 159 iterations. 
+# Log-likelihood: -32.95369 
+# AIC: 79.90738   AICc: 85.5073
+{
+years <- lgr_sar$year
+TT <- length(years)
+dat <- matrix(lgr_sar$logit.s, nrow = 1)
+index <- lgr_sar$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <- diag(m) #"identity" #"unconstrained" #"diagonal and equal" #
+U <-  matrix(0, nrow = m, ncol = 1) #"zero" #changing to  -1 to 1  works with varyin deg changes. higher(+ or -) values improves R.r and less in Q but estimate is worse.
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
 Q <- "unconstrained"
 A <- matrix(0)
-R <- matrix("r")
+R <-matrix(0.05) 
 
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
-fit7 <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
-autoplot(fit7, silent = TRUE)
-autoplot(fit7, silent = TRUE, plot.type = "fitted.ytt1")#one-step ahead
-
-MARSSparamCIs(fit6)
-
+fit<- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) # plot with all data (past and future observations) included in estimate
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")# plot with only past observations included in the estimate (one-step ahead)
+# fitted.ytt1 is more realisitic of what real forecast would be-- but the extra tight CI in ytT likely means that the model is relying heavily on future observations and that the model  likely needs to be tweaked to better estimate B, U, Z, Q and R
+MARSSparamCIs(fit)
 ```
 
+### CUTI
+```{r}
+sar<-lgr_sar %>% 
+  select(year, logit.s) %>% 
+  left_join(df_cuti, by = "year") 
+
+
+{
+years <- sar$year
+TT <- length(years)
+dat <- matrix(sar$logit.s, nrow = 1)
+index <- sar$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-  diag(m) #"diagonal and equal" #
+U <-  matrix(0, nrow = m, ncol = 1) 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.05)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+### NCBI
+
+```{r}
+#started in 1997
+sar<-sar %>% 
+  select(year, logit.s) %>% 
+  left_join(df_ncbi, by = "year") %>% 
+  drop_na()
+
+{
+years <- sar$year
+TT <- length(years)
+dat <- matrix(sar$logit.s, nrow = 1)
+index <- sar$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-  diag(m) #"diagonal and equal" #
+U <-  matrix("u", nrow = m, ncol = 1) 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.1)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
+### ICPB
+
+
+```{r}
+#started in 1997
+sar<-sar %>% 
+  select(year, logit.s) %>% 
+  left_join(df_icpb, by = "year") %>% 
+  drop_na()
+
+{
+years <- sar$year
+TT <- length(years)
+dat <- matrix(sar$logit.s, nrow = 1)
+index <- sar$value
+index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+m<-2  
+B <-  diag(m) #"diagonal and equal" #
+U <-  matrix("u", nrow = m, ncol = 1) 
+Z <- array(NA, c(1, m, TT))  
+Z[1,1,] <- rep(1, TT)       
+Z[1,2,] <- index_z       
+Q <- "unconstrained" #"diagonal and unequal"
+A <- matrix(0)
+R <- matrix(.1)
+inits_list <- list(x0 = matrix(c(0), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+fit <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+autoplot(fit, silent = TRUE) 
+autoplot(fit, silent = TRUE, plot.type = "fitted.ytt1")
+MARSSparamCIs(fit)
+```
