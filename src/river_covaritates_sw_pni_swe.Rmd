@@ -1,0 +1,231 @@
+---
+title: "river covariates & sar"
+output: html_document
+date: "2025-04-30"
+---
+
+
+```{r}
+library(tidyverse)
+library(MARSS)
+library(janitor)
+
+```
+
+##lastest build includes sar data for:
+
+```{r pni}
+data(SalmonSurvCUI, package = "MARSS")
+base_df<- SalmonSurvCUI %>% 
+  mutate(index = "CUI",
+         sar.method = "base") %>% 
+  rename("value" = CUI.apr) %>% 
+  mutate(year = as.numeric(year),
+         value = as.numeric(value))
+range(base_df$year)
+#import PNI
+pni <- read_csv(here::here("data/pni_data.csv"), skip = 1) %>% 
+  janitor::clean_names() %>% 
+  select(year,"value" = annual_pni ) %>% 
+  mutate(index = "PNI")
+
+
+sar.pni<-SalmonSurvCUI %>% 
+  select(year, logit.s ) %>%
+  left_join(pni, by = c("year"))
+
+#run DLM
+
+{
+  years <- sar.pni$year
+  TT <- length(years)
+  dat <- matrix(sar.pni$logit.s, nrow = 1)
+  index <- sar.pni$value
+  index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+  m<-2  
+  B <- diag(m)
+  U <- matrix(0, nrow = m, ncol = 1)
+  Z <- array(NA, c(1, m, TT))  
+  Z[1,1,] <- rep(1, TT)       
+  Z[1,2,] <- index_z       
+  Q <-"diagonal and equal"
+  A <- matrix(0)
+  R <- matrix("r")
+  inits_list <- list(x0 = matrix(c(0), nrow = m))
+  mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+  fit_base_pni <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+fit_base_pni
+autoplot(fit_base_pni, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+save(fit_base_pni, file = here::here("results/fit.sw.pni.RData"))
+```
+
+```{r swe}
+swe<-read_csv(here::here("data/swepeak.csv")) %>% 
+  clean_names() %>% 
+  select(year,  "value"= mean) %>% 
+  mutate(index = "SWE") %>% 
+  mutate(year = as.numeric(year)) %>% 
+  mutate(value = scale(value, center = TRUE, scale = TRUE))
+  
+
+sar.swe<-SalmonSurvCUI %>% 
+  select(year, logit.s ) %>%
+  left_join(swe_data, by = c("year")) %>% 
+  drop_na("value")
+
+unique(swe$year)
+unique(SalmonSurvCUI$year)
+
+{
+  years <- sar.swe$year
+  TT <- length(years)
+  dat <- matrix(sar.swe$logit.s, nrow = 1)
+  index <- sar.swe$value
+  index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+  m<-2  
+  B <- "diagonal and unequal" #diag(m)
+  U <- matrix(0, nrow = m, ncol = 1)
+  Z <- array(NA, c(1, m, TT))  
+  Z[1,1,] <- rep(1, TT)       
+  Z[1,2,] <- index_z       
+  Q <- "diagonal and unequal" # "diagonal and unequal"
+  A <- matrix(0)
+  R <- matrix("r")
+  inits_list <- list(x0 = matrix(c(0), nrow = m))
+  mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+  fit_base_swe <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+fit_base_swe
+autoplot(fit_base_swe, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+save(fit_base_swe, file = here::here("results/fit.sw.swe.RData"))
+```
+
+```{r dart_bon}
+dart<-read_csv(here::here("data/dart_BON_BOA_sar.csv")) %>% 
+  clean_names() %>% 
+    drop_na(year) %>% 
+  filter(year <= 2022) %>% 
+  mutate(logit.s = qlogis(mean_sar/100)) %>% 
+  select(year, logit.s) %>% 
+  mutate(sar.method = "DART") %>% 
+  mutate(year = as.numeric(year))
+
+
+dart.pni <- dart %>% 
+  left_join(pni, by = "year")
+dart.swe <- dart %>% 
+  left_join(swe, by = "year")
+
+{
+  years <- dart.pni$year
+  TT <- length(years)
+  dat <- matrix(dart.pni$logit.s, nrow = 1)
+  index <- dart.pni$value
+  index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+  m<-2  
+  B <- diag(m)
+  U <- matrix("u", nrow = m, ncol = 1)
+  Z <- array(NA, c(1, m, TT))  
+  Z[1,1,] <- rep(1, TT)       
+  Z[1,2,] <- index_z       
+  Q <- "unconstrained"
+  A <- matrix(0)
+  R <- matrix(.3)
+  inits_list <- list(x0 = matrix(c(0), nrow = m))
+  mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+  fit_dart_bon_pni <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+fit_dart_bon_pni
+plot(fit_dart_bon_pni, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+
+{
+  years <- dart.swe$year
+  TT <- length(years)
+  dat <- matrix(dart.swe$logit.s, nrow = 1)
+  index_z <- dart.swe$value
+  # index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+  m<-2  
+  B <- diag(m)
+  U <- matrix("u", nrow = m, ncol = 1)
+  Z <- array(NA, c(1, m, TT))  
+  Z[1,1,] <- rep(1, TT)       
+  Z[1,2,] <- index_z       
+  Q <- "unconstrained"
+  A <- matrix(0)
+  R <- matrix("r")
+  inits_list <- list(x0 = matrix(c(0), nrow = m))
+  mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+  fit_dart_bon_swe <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+fit_dart_bon_swe
+plot(fit_dart_bon_swe, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+
+```
+
+```{r}
+dart_lgr<-sar_raw_data %>% 
+  filter(sar.method == "DART", 
+         reach == "LGR-LGA"
+         ) %>% 
+  select(year, logit.s, reach, sar.method) %>% 
+  distinct()
+
+
+dart.pni <- dart_lgr %>% 
+  left_join(pni, by = "year")
+dart.swe <- dart_lgr %>% 
+  left_join(swe, by = "year")
+
+{
+  years <- dart.pni$year
+  TT <- length(years)
+  dat <- matrix(dart.pni$logit.s, nrow = 1)
+  index <- dart.pni$value
+  index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+  m<-2  
+  B <- diag(m)
+  U <- matrix(0, nrow = m, ncol = 1)
+  Z <- array(NA, c(1, m, TT))  
+  Z[1,1,] <- rep(1, TT)       
+  Z[1,2,] <- index_z       
+  Q <- "unconstrained"
+  A <- matrix(0)
+  R <- matrix("r")
+  inits_list <- list(x0 = matrix(c(0), nrow = m))
+  mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+  fit_dart_lgr_pni <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+fit_dart_lgr_pni
+plot(fit_dart_lgr_pni, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+
+{
+  years <- dart.swe$year
+  TT <- length(years)
+  dat <- matrix(dart.swe$logit.s, nrow = 1)
+  index_z <- dart.swe$value
+  # index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
+  m<-2  
+  B <- diag(m)
+  U <- matrix("u", nrow = m, ncol = 1)
+  Z <- array(NA, c(1, m, TT))  
+  Z[1,1,] <- rep(1, TT)       
+  Z[1,2,] <- index_z       
+  Q <- "unconstrained"
+  A <- matrix(0)
+  R <- matrix("r")
+  inits_list <- list(x0 = matrix(c(0), nrow = m))
+  mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+  fit_dart_bon_swe <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+}
+
+fit_dart_bon_swe
+plot(fit_dart_bon_swe, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+```
+
+

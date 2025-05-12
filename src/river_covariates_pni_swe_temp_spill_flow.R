@@ -1,4 +1,4 @@
-#PNI/SWE
+# PNI/SWE
 pni_data<-read_csv(here("data","pni_data.csv"), skip = 1)
 
 pni_data<-pni_data %>%
@@ -14,7 +14,7 @@ swe_data<-swe_data %>%
   select(year, "value" = mean) %>%
   mutate(index = "SWE")
 
-##DART
+## DART
 dart_bon<-read_csv(here("data","dart_BON_BOA_sar.csv")) %>%
   mutate(logit.s = qlogis(meanSAR/100)) %>%
   select(year, logit.s ) %>%
@@ -30,7 +30,7 @@ dart_lgr<-read_csv(here("data","LGRLGA_allpassage_wild_spsu_chinook.csv")) %>%
          sar = "dart") %>%
   mutate(year = as.numeric(year))
 
-##CJS
+## CJS
 cjs_bon<-read_csv(here("data","bon.boa.surv.yr.1994.2021_250309.csv")) %>%
   mutate(logit.s = qlogis(BON_BOA_SAR)) %>%
   select(year, logit.s) %>%
@@ -55,7 +55,15 @@ sar<-dart_bon %>%
   left_join(swe_data, by = "year") %>%
   drop_na(index)
 
+sar<-cjs_lgr %>%
+  left_join(pni_data, by = "year") %>%
+  drop_na(index)
 
+sar<-cjs_lgr %>%
+  left_join(swe_data, by = "year") %>%
+  drop_na(index)
+
+{
 years <- sar$year
 TT <- length(years)
 dat <- matrix(sar$logit.s, nrow = 1)
@@ -63,9 +71,9 @@ dat <- matrix(sar$logit.s, nrow = 1)
 m <- 2
 index <- sar$value
 index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
-B <- "diagonal and unequal"  #diag(m) ##diagonal and unequal" #diag(m) #"identity" #"unconstrained"
-U <- matrix(0, nrow = m, ncol = 1) ##"zero" #"u", or set to -1 to 1
-Q <-  "unconstrained"  #"diagonal and equal" #"equalvarcov" #unconstrained" #"unconstrained"
+B <- diag(m) ##diagonal and unequal" #diag(m) #"identity" #"unconstrained"
+U <- matrix("u", nrow = m, ncol = 1) ##"zero" #"u", or set to -1 to 1
+Q <- "diagonal and unequal" #"equalvarcov" #unconstrained" #"unconstrained"
 A <- matrix(0)
 R <- matrix("r") #.05 #"r"
 Z <- array(NA, c(1, m, TT))
@@ -74,13 +82,13 @@ Z[1,2,] <- index_z
 
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+}
+fit.cjs.lgr.swe<- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
 
-fit.cjs.lgr.pni<- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
-
-autoplot(fit.cjs.lgr.pni, silent = TRUE)
+autoplot(fit.cjs.lgr.swe, silent = TRUE)
 autoplot(fit.dart.bon.swe, silent = TRUE, plot.type = "fitted.ytt1")
 
-saveRDS(fit.dart.lgr.swe, here("results","fit.dart.lgr.swe.rds") )
+saveRDS(fit.cjs.lgr.swe, here("results","fit.cjs.lgr.swe.rds") )
 
 ### annual trends : %spill, temp, flow
 
@@ -330,17 +338,12 @@ riv_bon_temp %>%
 
 ### DLM
 
-sar<-dart_lgr %>%
-left_join(riv_lgr_mean %>% filter(index == "outflow"), by = "year") %>%
+sar<-cjs_bon %>%
+left_join(riv_lgr_mean %>% filter(index == "spillpct"), by = "year") %>%
   drop_na(index)
 
 
-
-# sar<-dart_bon %>%
-#   left_join(swe_data, by = "year") %>%
-#   drop_na(index)
-
-
+{
 years <- sar$year
 TT <- length(years)
 dat <- matrix(sar$logit.s, nrow = 1)
@@ -348,29 +351,35 @@ dat <- matrix(sar$logit.s, nrow = 1)
 m <- 2
 index <- sar$value
 index_z <- matrix((index - mean(index)) / sqrt(var(index)), nrow = 1)
-B <-diag(m) ##diagonal and unequal" #diag(m) #"identity" #"unconstrained"
-U <- matrix(0, nrow = m, ncol = 1) ##"zero" #"u", or set to -1 to 1
-Q <- "unconstrained" #"equalvarcov" #unconstrained" #"unconstrained"
+B <- "diagonal and unequal" #diag(m) #"identity" #"unconstrained" #"diagonal and unequal"
+U <- matrix("u", nrow = m, ncol = 1) ##"zero" #"u", or set to -1 to 1
+Q <-"diagonal and unequal" # #"equalvarcov" #unconstrained" #"unconstrained"
 A <- matrix(0)
-R <- matrix(.05) #.05 #"r"
+R <- matrix("r") #.05 #"r"
 Z <- array(NA, c(1, m, TT))
 Z[1,1,] <- rep(1, TT)
 Z[1,2,] <- index_z
 
 inits_list <- list(x0 = matrix(c(0), nrow = m))
 mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+}
+fit.cjs.bon.spill<- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
 
-fit.dart.lgr.flow<- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
-
-autoplot(fit.dart.lgr.flow, silent = TRUE)
+autoplot(fit.cjs.bon.spill, silent = TRUE)
 autoplot(fit.dart.bon.swe, silent = TRUE, plot.type = "fitted.ytt1")
 
-saveRDS(fit.dart.lgr.spill, here("results","fit.dart.lgr.spill.rds") )
+saveRDS(fit.cjs.bon.spill, here("results","fit.cjs.bon.spill.rds") )
 
 
 
 
-
+#compare models
+AIC(fit.dart.lgr.flow, fit.dart.lgr.spill, fit.dart.lgr.pni,fit.dart.lgr.swe)
+AIC(fit.dart.bon.flow, fit.dart.bon.spill, fit.dart.bon.pni,fit.dart.bon.swe)
+AIC(fit.cjs.lgr.pni,fit.cjs.lgr.swe)
+AIC(fit.cjs.lgr.spill, fit.cjs.lgr.flow)
+AIC(fit.cjs.bon.pni,fit.cjs.bon.swe)
+AIC(fit.cjs.bon.flow, fit.cjs.bon.spill)
 
 # at a glance-- annual trend
 ggplot(riv_bon_mean , aes( x= year, y = value)) +
