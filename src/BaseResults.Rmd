@@ -1,0 +1,914 @@
+---
+title: "BaseResults"
+output: html_document
+---
+
+
+FOCUS OF PAPER: Report on baseline results, which include the DLM with DART and CJS SAR estimates in more recent years. To start, focus on upwelling indices (CUI/CUTI) and then look into including river covariates. Additionally, run the model using all years by scaling DART/CJS SARs with Scheuerell and William SARs. (??But since different start end points since SW includes different dams, does this make sense???) COB suggests that the next step could include running the model with multiple covariates, including monthly mean values for river covariates and transport.
+
+
+Script includes code to generate:
+1. Scheuerell and Williams SAR estimates with: CUTI and CUI
+2. DART and CJS SAR estimates for LGR- LGA and BON-BOA with CUI and CUTI
+3. All years available for LGR-LGA by scaling DART and CJS by Scheuerell and Williams SARs. 
+    - Not BON-BOA?
+
+
+
+
+```{r}
+library(MARSS)
+library(tidyverse)
+library(here)
+library(rerddap) #import data from ERDDAP
+```
+
+
+# Indices
+## Coastal Upwelling Index (CUI)
+ - Years: 1964 to current
+```{r load_cui_data}
+### ERDAPP, NOAA upwelling indice CUI
+# Set the URL of the ERDDAP server
+url <- "https://upwell.pfeg.noaa.gov/erddap/"
+
+# Get information about the erdCUTI dataset
+info <- info(datasetid = "erdUI45mo", url = url)
+info # copy max range value from metadata
+
+# Download the dataset
+dat <- griddap(info,
+               time = c("1964-01-01T00:00:00Z", "2025-03-15T00:00:00Z"), #currently pulling all data to date (adjust as needed)
+               latitude = c(45,45)
+)
+
+# format time and lat/long
+df_cui_raw<-dat$data %>% 
+  mutate(time.day = lubridate::ymd_hms(time),
+         year = year(time.day),
+         month = month(time.day),
+         day = day(time.day), 
+         adjlong = longitude-360) #set to -180 to 180
+
+## only include april CUI from ERDAPP data (for now)
+df_cui<-df_cui_raw %>% 
+  filter(month %in% c(4, 9, 10) )%>% 
+  select(year, upwelling_index, month) %>% 
+    rename("value" = upwelling_index)  %>%
+  mutate(index = "CUI", 
+         month = factor(month, levels = c(4, 9, 10), labels = c("April", "September", "October"))) #set month as factor for plotting
+
+
+df_cui<-df_cui %>% 
+  filter(month %in% c(4, 5)) %>% 
+  select(year, upwelling_index, month) %>% 
+    rename("value" = upwelling_index)  %>%
+  mutate(index = "CUI", 
+         month = factor(month, levels = c(4, 5), labels = c("April", "May"))) #set month as factor for plotting
+
+
+df_cui_sum<-df_cui %>% 
+  pivot_wider(names_from = month, values_from = value) %>% 
+  mutate(apr.may = April + May)
+
+ggplot(df_cui , aes(x= year, y= value, color = month))+
+    geom_line() +
+  geom_point() +
+  labs(title = "CUI",
+       x = "Year",
+       y = "index") +
+  theme_minimal()
+```
+
+
+## CUTI
+- Years: 1988 to current
+
+```{r load_cuti_data}
+
+#load CUTI
+# Set the URL of the ERDDAP server
+#url <- "https://upwell.pfeg.noaa.gov/erddap/"
+
+# Get information about the erdCUTI dataset
+info <- info(datasetid = "erdCUTImonthly", url = url)
+info #copy max time range from metadata
+
+# Download the dataset
+dat <- griddap(info,
+               time = c("1988-01-15T00:00:00Z", "2025-03-15T00:00:00Z"), #currently pulling all data to date
+               latitude = c(45,45)
+)
+
+
+df_cuti<-dat$data %>% 
+  mutate(time.day = lubridate::ymd_hms(time),
+         year = year(time.day),
+         month = month(time.day),
+         day = day(time.day)) %>% 
+  filter(month %in% c(4, 9, 10) )%>% 
+  select(year, CUTI, month) %>% 
+  rename(value = "CUTI") %>% 
+  mutate(index = "CUTI", 
+         month = factor(month, levels = c(4, 9, 10), labels = c("April", "September", "October"))) #set month as factor for plotting
+
+ggplot(df_cuti, aes(x = year, y = value, color = month)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "CUTI",
+       x = "Year",
+       y = "index") +
+  theme_minimal()
+
+```
+
+
+
+
+
+# Scheurell and Williams
+
+## CUI
+### recreate model in paper (april, may, oct CUI) x Q <- "diagonal and equal" OR apply discount strategy
+```{r}
+
+
+df<-SalmonSurvCUI %>% 
+  select(-CUI.apr) %>% 
+  left_join(df_cui, by = "year") %>% 
+  pivot_wider(names_from = month, values_from = value) 
+
+df<-SalmonSurvCUI %>% 
+  select(-CUI.apr) %>% 
+  left_join(df_cui_sum, by = "year")
+
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit.s, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$April)[,1]
+index_sep <- scale(df$September)[,1]
+index_oct <- scale(df$October)[,1]
+
+index.apr.may<-scale(df$apr.may)[,1]
+
+m <- 4  # 1 intercept + slope
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1)
+
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+Z[1,3,] <- index_sep        # September
+Z[1,4,] <- index_oct        # October
+
+# Q <- "diagonal and equal" #only converges with diagonal and equal-- which is not represented in the paper but returns fairly similar as if using discount values reported. 
+
+#setting based on discounts reported in paper:
+# We selected the discounts byvarying them systematically and then minimizing thenegative log-likelihood of the overall model. Our ﬁnal discounts were 0.9, 0.95, and 0.9 for the trend,regression, and variance blocks, respectively.
+# Based on pole 1994 :
+# On this information scale the discount factor delta = (1 + lambda)^-1 with delta= discount factor 0-1, 1 = all information, 0 = no information. Lower the discount value, the faster a parameter can change  through time but at the cost of decreased precision in the estimate. So a discount of .95 = 5% lambda exponential decay rate?
+discount_trend <- 0.90
+discount_reg   <- 0.95
+discount_var   <- 0.90
+
+trend_var <- (1 - discount_trend) / discount_trend   # 0.1111111
+reg_var   <- (1 - discount_reg)   / discount_reg     # 0.05263158
+obs_var   <- (1 - discount_var)   / discount_var     # 0.1111111
+Q <- matrix(list(0), m, m)
+diag(Q) <- c(trend_var, reg_var, reg_var, reg_var)
+
+
+A <- matrix(0)
+R <- matrix(obs_var)
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_base_sw <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_base_sw, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+save(fit_base_sw, file = here::here("results/fit.sw.cui.RData"))
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_sw, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_sw, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+```
+
+
+Will either need to spend more time rereading the paper to see if am missing something based on their methods, or reach out to confirm results-- not sure how to apply the discount factors within marss framework-- require building dlm model or can I use dlm or mvdlm? At first glance doesn't seem to work the same way as described in paper.
+
+
+
+### just april x Q <- "diagonal and unequal" 
+```{r}
+
+m <- 2  # 1 intercept + slope
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1)
+
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+
+# Q <- "diagonal and unequal" 
+# A <- matrix(0)
+# R <- matrix("r")
+
+Q <- matrix(list(0), m, m)
+diag(Q) <- c(trend_var, reg_var, reg_var,reg_var)
+
+Q<- "diagonal and equal" 
+
+
+A <- matrix(0)
+R <- matrix("r")
+
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_base_sw_april <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_base_sw_april, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+save(fit_base_sw, file = here::here("results/fit.sw.cui.RData"))
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_sw, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_sw, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+fitted_tt1
+fitted(fit_base_sw)
+
+```
+
+
+### apr.may
+
+```{r}
+df<-SalmonSurvCUI %>% 
+  select(-CUI.apr) %>% 
+  left_join(df_cui_sum, by = "year")
+
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit.s, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$April)[,1]
+index_may <- scale(df$May)[,1]
+index_aprmay<-scale(df$apr.may)[,1]
+
+m <- 3   # 1 intercept + regs
+m <- 2   # 1 intercept + regs
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1)
+
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_aprmay        # Sum April. May
+
+Z[1,2,] <- index_apr        # April
+Z[1,3,] <- index_may        # may
+
+discount_trend <- 0.90
+discount_reg   <- 0.90
+discount_var   <- 0.90
+
+trend_var <- (1 - discount_trend) / discount_trend   # 0.1111111
+reg_var   <- (1 - discount_reg)   / discount_reg     # 0.05263158
+obs_var   <- (1 - discount_var)   / discount_var     # 0.1111111
+
+Q <- matrix(list(0), m, m)
+diag(Q) <- c(trend_var, reg_var)
+
+Q<-"diagonal and unequal"
+
+A <- matrix(0)
+R <- matrix(obs_var)
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+
+fit_apr.may.sum.sw <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_apr.may.sw, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_sw, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_sw, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+```
+
+## CUTI
+
+### recreate model in paper (april, may, oct CUTI) x Q <- "diagonal and equal"
+
+```{r}
+df<-SalmonSurvCUI %>% 
+  select(-CUI.apr) %>% 
+  left_join(df_cuti, by = "year") %>% 
+    drop_na() %>% 
+  pivot_wider(names_from = month, values_from = value) 
+
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit.s, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$April)[,1]
+index_sep <- scale(df$September)[,1]
+index_oct <- scale(df$October)[,1]
+
+
+#update covariate data
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+Z[1,3,] <- index_sep        # September
+Z[1,4,] <- index_oct        # October
+
+# model parameter (B, U, Q, A, R) kept to match sw x cui
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_base_sw_cuti <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_base_sw_cuti, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+save(fit_base_sw, file = here::here("results/fit.sw.cui.RData"))
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_sw, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_sw, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+
+```
+
+
+
+
+# CJS SAR estimates
+
+## CUI
+```{r}
+df<-sar_cjs %>% 
+  select(-c(value, index)) %>% 
+  left_join(df_cui, by = "year") %>% 
+  drop_na() %>% 
+  pivot_wider(names_from = month, values_from = value)
+
+
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit.s, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$April)[,1]
+index_sep <- scale(df$September)[,1]
+index_oct <- scale(df$October)[,1]
+
+
+#update covariates
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+Z[1,3,] <- index_sep        # September
+Z[1,4,] <- index_oct        # October
+
+
+# model parameter (B, U, Q, A, R) kept to match sw x cui
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_base_cjs_cui <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_base_cjs_cui, plot.type = c("fitted.ytT","fitted.ytt1", "xtT"), silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+# save(fit_base_cjs_cui, file = here::here("results/fit.cjs.cui.RData"))
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_cjs_cui, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_cjs_cui, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+
+```
+
+## CUTI 
+```{r}
+df<-sar_cjs %>% 
+  select(-c(value, index)) %>% 
+  left_join(df_cuti, by = "year") %>% 
+  drop_na() %>% 
+  pivot_wider(names_from = month, values_from = value)
+
+
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit.s, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$April)[,1]
+index_sep <- scale(df$September)[,1]
+index_oct <- scale(df$October)[,1]
+
+
+#update covariates
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+Z[1,3,] <- index_sep        # September
+Z[1,4,] <- index_oct        # October
+
+
+# model parameter (B, U, Q, A, R) kept to match sw x cui
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_base_cjs_cuti <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_base_cjs_cuti, plot.type = c("fitted.ytT","fitted.ytt1", "xtT"), silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+# save(fit_base_cjs_cuti, file = here::here("results/fit.sw.cui.RData"))
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_cjs_cuti, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_cjs_cuti, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+```
+
+
+
+
+
+# DART SAR estimates
+## CUI
+```{r}
+df<-sar_dart %>% 
+  select(-c(value, index)) %>% 
+  left_join(df_cui, by = "year") %>% 
+  drop_na() %>% 
+  pivot_wider(names_from = month, values_from = value)
+
+
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit.s, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$April)[,1]
+index_sep <- scale(df$September)[,1]
+index_oct <- scale(df$October)[,1]
+
+
+#update covariates
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+Z[1,3,] <- index_sep        # September
+Z[1,4,] <- index_oct        # October
+
+
+# model parameter (B, U, Q, A, R) kept to match sw x cui
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_base_dart_cui <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_base_dart_cui, plot.type = c("fitted.ytT","fitted.ytt1", "xtT"), silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+# save(fit_base_dart_cui, file = here::here("results/fit.cjs.cui.RData"))
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_dart_cui, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_dart_cui, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+
+```
+
+
+## CUTI 
+```{r}
+df<-sar_dart %>% 
+  select(-c(value, index)) %>% 
+  left_join(df_cuti, by = "year") %>% 
+  drop_na() %>% 
+  pivot_wider(names_from = month, values_from = value)
+
+df.cbr %>% 
+  select(-reach) %>% 
+    left_join(df_cuti, by = "year") %>% 
+  drop_na() %>% 
+  pivot_wider(names_from = month, values_from = value)
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit.s, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$April)[,1]
+index_sep <- scale(df$September)[,1]
+index_oct <- scale(df$October)[,1]
+
+
+#update covariates
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+Z[1,3,] <- index_sep        # September
+Z[1,4,] <- index_oct        # October
+
+
+# model parameter (B, U, Q, A, R) kept to match sw x cui
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_base_dart_cuti <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_base_dart_cuti, plot.type = c("fitted.ytT","fitted.ytt1", "xtT"), silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+# save(fit_base_dart_cuti, file = here::here("results/fit.sw.cui.RData"))
+
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_dart_cuti, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_dart_cuti, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+```
+
+
+
+
+
+# All years, scale DART and CJS by Scheuerell and Williams SARs
+```{r}
+
+
+# plot sars without rescaling
+ggplot() +
+  geom_line(data = sar_dart, aes(x = year, y = plogis(logit.s), color = "DART")) +
+   geom_line(data = sar_cjs, aes(x = year, y = plogis(logit.s), color = "CJS")) +
+  geom_line(data = SalmonSurvCUI, aes(x = year, y = plogis(logit.s), color = "Scheuerell & Williams")) +
+  labs(title = "Comparison of SAR Estimates",
+       x = "Year",
+       y = "prop SAR",
+       color = "Model") +
+  theme_minimal()
+
+
+# check means
+mean(plogis(sar_dart$logit.s))
+mean(plogis(sar_cjs$logit.s))
+mean(plogis(SalmonSurvCUI$logit.s))
+
+
+# scaling DART and CJS by Scheuerell & Williams SARs:
+sw_df   <- sar_sw %>% select(year, logit.s)  %>% rename(logit_SW   = logit.s) 
+dart_df <- sar_dart  %>% select(year, logit.s) %>% rename(logit_DART = logit.s)
+cjs_df  <- sar_cjs %>% select(year, logit.s) %>% rename(logit_CJS  = logit.s) 
+
+
+sar_all <- full_join(sw_df, dart_df, by = "year") %>%
+  full_join(cjs_df, by = "year")
+
+# Compute mean and sd of SW , and rescale other sars
+sar_scaled <- sar_all %>%
+  mutate(
+    sw_mean = mean(logit_SW, na.rm = TRUE),
+    sw_sd   = sd(logit_SW, na.rm = TRUE),
+    
+    logit_DART_rescaled = (logit_DART - mean(logit_DART, na.rm = TRUE)) / 
+                          sd(logit_DART, na.rm = TRUE) * sw_sd + sw_mean,
+    
+    logit_CJS_rescaled  = (logit_CJS - mean(logit_CJS, na.rm = TRUE)) / 
+                          sd(logit_CJS, na.rm = TRUE) * sw_sd + sw_mean
+  ) %>%
+  select(-sw_mean, -sw_sd)
+
+glimpse(sar_scaled)
+
+
+# plot rescaled
+ggplot(data = sar_scaled) +
+  geom_line( aes(x = year, y = logit_DART_rescaled, color = "DART (scaled)")) +
+  geom_line( aes(x = year, y = logit_CJS_rescaled, color = "CJS (scaled)")) +
+  geom_line(aes(x = year, y = logit_SW, color = "Scheuerell & Williams")) +
+  geom_line(data = sar_dart, aes(x = year, y = logit.s, color = "DART (original)"), alpha = .5) +
+  geom_line(data = sar_cjs, aes(x = year, y = logit.s, color = "CJS (original)"), alpha = .5) +
+  labs(title = "Scaled SAR Estimates",
+       x = "Year",
+       y = "Standardized Logit SAR",
+       color = "Model") +
+  theme_minimal()
+```
+### apply sw to dart to run "all years" model
+```{r}
+# code can be run with discount or without
+
+sar_scaled<-sar_scaled %>% 
+  left_join(df_cui %>% filter(month == "April") , by = "year") %>% 
+  mutate(
+    logit_sw_dart_z = coalesce(logit_DART_rescaled, logit_SW),
+    logit_sw_cjs_z = coalesce(logit_CJS_rescaled, logit_SW)
+  ) %>% 
+  select(year, logit_sw_dart_z, logit_sw_cjs_z, value, index)
+
+df<-sar_scaled  
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit_sw_dart_z, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$value)
+
+m <- 2  # 1 intercept + slope
+B <- diag(m)
+U <- matrix("u", nrow = m, ncol = 1)
+
+#update covariates
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+# Z[1,3,] <- index_sep        # September
+# Z[1,4,] <- index_oct        # October
+
+
+discount_trend <- 0.90
+discount_reg   <- 0.95
+discount_var   <- 0.90
+
+trend_var <- (1 - discount_trend) / discount_trend   # 0.1111111
+reg_var   <- (1 - discount_reg)   / discount_reg     # 0.05263158
+obs_var   <- (1 - discount_var)   / discount_var     # 0.1111111
+Q <- matrix(list(0), m, m)
+diag(Q) <- c(trend_var, reg_var)
+
+# Q<- "diagonal and unequal"
+
+A <- matrix(0)
+R <- matrix(obs_var)
+# R<- matrix("r")
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_sw_dart_z <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_sw_dart_z, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+save(fit_base_sw, file = here::here("results/fit.sw.cui.RData"))
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_dart_cui, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_dart_cui, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+
+
+```
+
+
+### apply sw to cjs to run "all years" model
+```{r}
+# code can be run with discount or without
+sar_scaled<-sar_scaled %>% 
+  left_join(df_cui %>% filter(month == "April") , by = "year") %>% 
+  mutate(
+    logit_sw_dart_z = coalesce(logit_DART_rescaled, logit_SW),
+    logit_sw_cjs_z = coalesce(logit_CJS_rescaled, logit_SW)
+  ) %>% 
+  select(year, logit_sw_dart_z, logit_sw_cjs_z, value, index) 
+
+df<-sar_scaled   %>% 
+  drop_na() #drop for cjs ends in 2019
+
+years <- df$year
+TT <- length(years)
+dat <- matrix(df$logit_sw_cjs_z, nrow = 1)
+
+# Standardize each month separately
+index_apr <- scale(df$value)
+
+m <- 2  # 1 intercept + slope
+B <- diag(m)
+U <- matrix(0, nrow = m, ncol = 1)
+
+#update covariates
+Z <- array(NA, c(1, m, TT)) # n x m x T array n = # of responses (1), m = # of regression parameters (slope + intercept =2), and T is the length of time (years = 42)
+Z[1,1,] <- 1                # Intercept
+Z[1,2,] <- index_apr        # April
+# Z[1,3,] <- index_sep        # September
+# Z[1,4,] <- index_oct        # October
+
+
+discount_trend <- 0.90
+discount_reg   <- 0.95
+discount_var   <- 0.90
+
+trend_var <- (1 - discount_trend) / discount_trend   # 0.1111111
+reg_var   <- (1 - discount_reg)   / discount_reg     # 0.05263158
+obs_var   <- (1 - discount_var)   / discount_var     # 0.1111111
+Q <- matrix(list(0), m, m)
+diag(Q) <- c(trend_var, reg_var)
+
+# Q<- "diagonal and unequal"
+
+A <- matrix(0)
+R <- matrix(obs_var)
+# R<- matrix("r")
+inits_list <- list(x0 = matrix(rep(0, m), nrow = m))
+mod_list <- list(B = B, U = U, Q = Q, Z = Z, A = A, R = R)
+
+fit_sw_cjs_z <- MARSS::MARSS(dat, inits = inits_list, model = mod_list)
+
+  
+autoplot(fit_sw_cjs_z, silent = TRUE) # plot.type = c("fitted.ytT", "xtT")
+save(fit_base_sw, file = here::here("results/fit.sw.cui.RData"))
+
+# Observed values
+observed_vals <- dat[1, ]
+
+# Predictive residuals (forecast model)
+resid_tt1 <- MARSSresiduals(fit_base_dart_cui, type = "tt1")$model.residuals[1, ]
+fitted_tt1 <- observed_vals - resid_tt1
+R2_pred <- 1 - sum((observed_vals - fitted_tt1)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# In-sample residuals (fitted model)
+resid_tt <- MARSSresiduals(fit_base_dart_cui, type = "tt")$model.residuals[1, ]
+fitted_tt <- observed_vals - resid_tt
+R2_fit <- 1 - sum((observed_vals - fitted_tt)^2) / sum((observed_vals - mean(observed_vals))^2)
+
+# Report both
+R2_pred
+R2_fit
+
+
+
+```
+
+# check sars from paper
+```{r}
+# Create a data frame with Year and SAR (%)
+sar_df <- data.frame(
+  Year = c(1964, 1965, 1966, 1967, 1968, 1969, 1970, 1971, 1972, 1973, 1974,
+           1975, 1976, 1977, 1978, 1979, 1980, 1981, 1982, 1983, 1984, 1985,
+           1986, 1987, 1988, 1989, 1990, 1991, 1992, 1993, 1994, 1995, 1996,
+           1997, 1998, 1999, 2000, 2001, 2002),
+  SAR_percent = c(3.06, 3.48, 2.71, 4.61, 2.62, 3.39, 1.93, 1.49, 0.80, 0.35, 1.00,
+                  2.87, 0.32, 0.56, 0.98, 0.56, 0.56, 0.60, 1.41, 1.03, 0.95, 1.51,
+                  0.52, 0.58, 0.69, 0.54, 1.31, 0.49, 0.20, 0.22, 0.71, 0.60, 0.29,
+                  1.58, 1.73, 3.76, 3.04, 2.99, 4.01)
+)
+
+# Convert percent to proportion
+sar_df$SAR_prop <- sar_df$SAR_percent / 100
+
+# Apply logit transformation
+sar_df$logit_s <- log(sar_df$SAR_prop / (1 - sar_df$SAR_prop))
+
+
+ggplot() +
+  geom_line(data = sar_df, aes(x = Year, y = logit_s, color = "Scheuerell & Williams")) +
+  geom_line(data= SalmonSurvCUI, aes( x = year, y = logit.s, color = "ATSA")) +
+  labs(title = "Scheuerell & Williams SAR Estimates",
+       x = "Year",
+       y = "Logit SAR",
+       color = "Model") +
+  theme_minimal()
+```
+
+
+
+
+8/5/2025: Just met with JG for quick meeting and changing priority. SARforecastDLM and associated white paper are within the Oct - Sept 26 Fiscal year. Finish work on other priorities first, and work on this when possible. For future self: I left off with scaling dart and cjs SARs with SW and rerunning with CUIapr. For first step on white paper, check if apr, sept, oct perform better than just apr, and then if does not improve, then run with just apr and use the discount strategy. Start there and then go deeper if time allows, other covariates (river, near-shore,etc), include age, species, etc

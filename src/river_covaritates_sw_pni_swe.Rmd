@@ -48,7 +48,7 @@ sar.pni<-SalmonSurvCUI %>%
   Z <- array(NA, c(1, m, TT))  
   Z[1,1,] <- rep(1, TT)       
   Z[1,2,] <- index_z       
-  Q <-"diagonal and equal"
+  Q <- "diagonal and equal" #"unconstrained"
   A <- matrix(0)
   R <- matrix("r")
   inits_list <- list(x0 = matrix(c(0), nrow = m))
